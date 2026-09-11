@@ -46,15 +46,60 @@
 
 import { execFile } from 'node:child_process'
 import { createHash } from 'node:crypto'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 
-const NOTIFY_MINUTES = [50, 55]
-const COMPACT_MINUTE = 55 // このタイミングで/compactを自動送信する
+// notifyMinutes/compactMinute/messagesはconfig.json（プラグイン直下、gitignore対象）で
+// 上書きできる。無ければこのデフォルトを使う。詳細はREADMEの「設定のカスタマイズ」を参照。
+const DEFAULT_CONFIG = {
+  notifyMinutes: [50, 55],
+  compactMinute: 55, // このタイミングで/compactを自動送信する
+  messages: {
+    warning: {
+      title: '🟡 {label}: 放置{minutes}分',
+      body: 'そろそろキャッシュ切れが近い、確認して'
+    },
+    compact: {
+      title: '🔴 {label}: 放置{minutes}分',
+      body: 'キャッシュ切れ確定ライン。これから/compactを自動実行するよ'
+    }
+  }
+}
+
 const MS_PER_MIN = 60 * 1000
 const KEEPALIVE_INTERVAL_MS = 4 * MS_PER_MIN
 const STORAGE_PREFIX = 'workingSince:'
 const SETTLED_PREFIX = 'settled:'
 const RECAP_HASH_PREFIX = 'recapHash:'
 const COMPACT_RECAP_MARKER = 'recap:'
+
+// config.jsonが無い/壊れている場合はデフォルトにフォールバックする。
+function loadConfig(orca) {
+  let userConfig = {}
+  try {
+    const configPath = fileURLToPath(new URL('./config.json', import.meta.url))
+    userConfig = JSON.parse(readFileSync(configPath, 'utf8'))
+  } catch (error) {
+    if (error.code !== 'ENOENT') {
+      orca.log(`config.json load failed, falling back to defaults: ${error.message}`)
+    }
+  }
+  const notifyMinutes =
+    Array.isArray(userConfig.notifyMinutes) && userConfig.notifyMinutes.length > 0
+      ? [...userConfig.notifyMinutes].sort((a, b) => a - b)
+      : DEFAULT_CONFIG.notifyMinutes
+  const compactMinute =
+    typeof userConfig.compactMinute === 'number' ? userConfig.compactMinute : notifyMinutes[notifyMinutes.length - 1]
+  const messages = {
+    warning: { ...DEFAULT_CONFIG.messages.warning, ...userConfig.messages?.warning },
+    compact: { ...DEFAULT_CONFIG.messages.compact, ...userConfig.messages?.compact }
+  }
+  return { notifyMinutes, compactMinute, messages }
+}
+
+function renderTemplate(template, vars) {
+  return template.replace(/\{(\w+)\}/g, (match, key) => (key in vars ? String(vars[key]) : match))
+}
 
 function storageKey(worktreeId) {
   return `${STORAGE_PREFIX}${worktreeId}`
@@ -175,6 +220,7 @@ async function wasJustCompacted(orca, worktreeId) {
 }
 
 export default function activate(orca) {
+  const config = loadConfig(orca)
   const worktreeLabels = new Map() // worktreeId -> branch/path
   const timersByWorktree = new Map() // worktreeId -> { timers: Timeout[] }
   const settledWorktrees = new Set()
@@ -215,12 +261,12 @@ export default function activate(orca) {
 
   async function notify(worktreeId, minutes) {
     const label = worktreeLabels.get(worktreeId) || fallbackLabel(worktreeId)
-    const isCompactMinute = minutes === COMPACT_MINUTE
+    const isCompactMinute = minutes === config.compactMinute
+    const template = isCompactMinute ? config.messages.compact : config.messages.warning
+    const vars = { label, minutes }
     await orca.host.call('notifications.show', {
-      title: isCompactMinute ? `🔴 ${label}: 放置${minutes}分` : `🟡 ${label}: 放置${minutes}分`,
-      body: isCompactMinute
-        ? 'キャッシュ切れ確定ライン。これから/compactを自動実行するよ'
-        : 'そろそろキャッシュ切れが近い、確認して'
+      title: renderTemplate(template.title, vars),
+      body: renderTemplate(template.body, vars)
     })
     orca.log(`notified ${worktreeId} at ${minutes}min`)
     if (isCompactMinute) {
@@ -239,7 +285,7 @@ export default function activate(orca) {
   function scheduleForWorktree(worktreeId, workingSince) {
     clearWorktreeTimers(worktreeId)
     const now = Date.now()
-    const pendingMinutes = NOTIFY_MINUTES.filter(
+    const pendingMinutes = config.notifyMinutes.filter(
       (minutes) => workingSince + minutes * MS_PER_MIN - now > 0
     )
     if (pendingMinutes.length === 0) {

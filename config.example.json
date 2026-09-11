@@ -1,0 +1,14 @@
+{
+  "notifyMinutes": [50, 55],
+  "compactMinute": 55,
+  "messages": {
+    "warning": {
+      "title": "🟡 {label}: 放置{minutes}分",
+      "body": "そろそろキャッシュ切れが近い、確認して"
+    },
+    "compact": {
+      "title": "🔴 {label}: 放置{minutes}分",
+      "body": "キャッシュ切れ確定ライン。これから/compactを自動実行するよ"
+    }
+  }
+}
